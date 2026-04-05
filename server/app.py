@@ -4,12 +4,12 @@ import os
 import sys
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from pydantic import BaseModel
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models import GovernAIAction, GovernAIObservation, PolicyAction
+from models import GovernAIAction, GovernAIObservation, State
 from server.governai_environment import GovernAIEnvironment, TASK_CONFIGS
 
 
@@ -46,7 +46,20 @@ async def root():
         "name": "GovernAI",
         "description": "AI Policy Simulator — govern a city through policy decisions",
         "version": "1.0.0",
-        "endpoints": ["/health", "/reset", "/step", "/state", "/schema", "/tasks"],
+        "endpoints": [
+            "/health", "/metadata", "/reset", "/step",
+            "/state", "/schema", "/tasks", "/mcp",
+        ],
+    }
+
+
+@app.get("/metadata")
+async def metadata():
+    return {
+        "name": "GovernAI",
+        "description": "AI Policy Simulator — govern a city through policy decisions",
+        "version": "1.0.0",
+        "author": "GovernAI Team",
     }
 
 
@@ -86,6 +99,42 @@ async def get_schema():
     return {
         "action": GovernAIAction.model_json_schema(),
         "observation": GovernAIObservation.model_json_schema(),
+        "state": State.model_json_schema(),
+    }
+
+
+@app.post("/mcp")
+async def mcp_endpoint(request_raw: Request):
+    try:
+        body = await request_raw.json()
+    except Exception:
+        return {
+            "jsonrpc": "2.0",
+            "error": {"code": -32700, "message": "Parse error"},
+            "id": None,
+        }
+
+    request_id = body.get("id") if isinstance(body, dict) else None
+    method = body.get("method") if isinstance(body, dict) else None
+
+    if not method:
+        return {
+            "jsonrpc": "2.0",
+            "error": {"code": -32600, "message": "Invalid Request: missing method"},
+            "id": request_id,
+        }
+
+    if method == "tools/list":
+        return {
+            "jsonrpc": "2.0",
+            "result": {"tools": []},
+            "id": request_id,
+        }
+
+    return {
+        "jsonrpc": "2.0",
+        "error": {"code": -32601, "message": f"Method not found: {method}"},
+        "id": request_id,
     }
 
 
@@ -99,3 +148,12 @@ async def get_tasks():
         }
         for task_id, cfg in TASK_CONFIGS.items()
     }
+
+
+def main(port: int = 7860, host: str = "0.0.0.0"):
+    import uvicorn
+    uvicorn.run(app, host=host, port=port)
+
+
+if __name__ == "__main__":
+    main()
