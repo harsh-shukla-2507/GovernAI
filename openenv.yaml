@@ -1,0 +1,38 @@
+name: govern_ai
+version: "1.0.0"
+description: >
+  GovernAI — AI Policy Simulator.
+  An RL environment where an LLM agent acts as a city governor,
+  making policy decisions under uncertainty to balance economy,
+  health, education, pollution, happiness, inequality, budget,
+  and unemployment.
+author: GovernAI Team
+
+environment:
+  server_module: server.app
+  server_attribute: app
+  port: 7860
+
+tasks:
+  - id: stable_city
+    description: >
+      Govern a stable city for 12 months with no crises.
+      Focus on maintaining balance across all metrics.
+    difficulty: easy
+    max_steps: 12
+
+  - id: austerity_challenge
+    description: >
+      Recover a city from economic crisis over 18 months.
+      Budget starts critically low and unemployment is high.
+      Preset events at months 6 and 12 test adaptive governance.
+    difficulty: medium
+    max_steps: 18
+
+  - id: crisis_governance
+    description: >
+      Navigate 24 months of governance with random crises
+      including pandemics, floods, recessions, energy shortages,
+      and civil protests. Requires long-term planning and resilience.
+    difficulty: hard
+    max_steps: 24

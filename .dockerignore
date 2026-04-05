@@ -1,0 +1,15 @@
+.git
+.gitignore
+.dockerignore
+DESIGN_DOC.md
+*.md
+!README.md
+__pycache__
+*.pyc
+*.egg-info
+.env
+.env.*
+.vscode
+.idea
+.DS_Store
+client.py
