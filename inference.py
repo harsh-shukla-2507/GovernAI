@@ -139,54 +139,65 @@ def get_llm_action(
 # ---------------------------------------------------------------------------
 
 
+def _post(url: str, payload: dict, retries: int = 3) -> dict:
+    """POST with retry and error handling. Returns parsed JSON response."""
+    for attempt in range(retries):
+        try:
+            resp = requests.post(url, json=payload, timeout=60)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as exc:
+            print(f"    Network error (attempt {attempt + 1}/{retries}): {exc}")
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+    raise RuntimeError(f"Failed to reach {url} after {retries} attempts")
+
+
 def run_task(env_url: str, task_id: str, llm_client: OpenAI, model: str) -> float:
     """Run a single governance task and return the grader score."""
     print(f"\n{'=' * 60}")
     print(f"  TASK: {task_id}")
     print(f"{'=' * 60}")
 
-    resp = requests.post(
-        f"{env_url}/reset",
-        json={"task_id": task_id, "episode_id": task_id},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    observation = data["observation"]
+    try:
+        data = _post(f"{env_url}/reset", {"task_id": task_id, "episode_id": task_id})
+        observation = data.get("observation", {})
 
-    step_num = 0
-    while not observation.get("done", False):
-        step_num += 1
-        month = observation.get("month", step_num)
-        max_months = observation.get("max_months", "?")
+        step_num = 0
+        max_steps = 100
+        while not observation.get("done", False) and step_num < max_steps:
+            step_num += 1
+            month = observation.get("month", step_num)
+            max_months = observation.get("max_months", "?")
 
-        action = get_llm_action(llm_client, model, observation)
-        policy = action.get("policy", "do_nothing")
-        reasoning = action.get("reasoning", "")
+            action = get_llm_action(llm_client, model, observation)
+            policy = action.get("policy", "do_nothing")
+            reasoning = action.get("reasoning", "")
 
-        print(f"  Month {month}/{max_months}: {policy} — {reasoning}")
+            print(f"  Month {month}/{max_months}: {policy} — {reasoning}")
 
-        resp = requests.post(
-            f"{env_url}/step",
-            json={"action": {"policy": policy, "reasoning": reasoning}},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        observation = data["observation"]
+            data = _post(
+                f"{env_url}/step",
+                {"action": {"policy": policy, "reasoning": reasoning}},
+            )
+            observation = data.get("observation", {})
 
-    meta = observation.get("metadata", {})
-    grader_score = meta.get("grader_score", 0.0)
+        meta = observation.get("metadata", {})
+        grader_score = meta.get("grader_score", 0.0)
 
-    print(f"\n  Final city metrics:")
-    for key in [
-        "economy", "health", "education", "pollution",
-        "happiness", "inequality", "budget", "unemployment",
-    ]:
-        print(f"    {key:>14s}: {observation.get(key, 'N/A')}")
-    print(f"\n  GRADER SCORE: {grader_score:.4f}")
+        print(f"\n  Final city metrics:")
+        for key in [
+            "economy", "health", "education", "pollution",
+            "happiness", "inequality", "budget", "unemployment",
+        ]:
+            print(f"    {key:>14s}: {observation.get(key, 'N/A')}")
+        print(f"\n  GRADER SCORE: {grader_score:.4f}")
 
-    return grader_score
+        return grader_score
+
+    except Exception as exc:
+        print(f"\n  Task {task_id} failed: {exc}")
+        return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -211,16 +222,24 @@ def main() -> None:
     print(f"  LLM model   : {MODEL_NAME}")
     print()
 
-    # Health check
-    try:
-        resp = requests.get(f"{ENV_URL}/health", timeout=10)
-        if resp.status_code != 200:
-            print(f"Environment health check failed (HTTP {resp.status_code})")
-            sys.exit(1)
-        print("  Environment health check: OK")
-    except requests.RequestException as exc:
-        print(f"Cannot connect to environment at {ENV_URL}: {exc}")
+    # Health check with retries (container may still be starting)
+    healthy = False
+    for attempt in range(10):
+        try:
+            resp = requests.get(f"{ENV_URL}/health", timeout=10)
+            if resp.status_code == 200:
+                healthy = True
+                break
+        except requests.RequestException:
+            pass
+        wait = min(2 ** attempt, 30)
+        print(f"  Waiting for environment (attempt {attempt + 1}/10, next retry in {wait}s)...")
+        time.sleep(wait)
+
+    if not healthy:
+        print(f"Cannot connect to environment at {ENV_URL} after 10 attempts")
         sys.exit(1)
+    print("  Environment health check: OK")
 
     scores: dict[str, float] = {}
     start = time.time()
