@@ -24,14 +24,12 @@ import time
 import requests
 from openai import OpenAI
 
-# ---------------------------------------------------------------------------
-# Configuration from environment
-# ---------------------------------------------------------------------------
-
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME = os.getenv("MODEL_NAME")
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-ENV_URL = os.getenv("ENV_URL", "http://localhost:7860")
+MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
+HF_TOKEN = os.getenv("HF_TOKEN")
+ENV_URL = os.getenv("ENV_URL") or os.getenv("ENV_BASE_URL", "http://localhost:7860")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+BENCHMARK = "governai"
 
 TASKS = ["stable_city", "austerity_challenge", "crisis_governance"]
 
@@ -78,9 +76,24 @@ Valid actions:
 """
 
 
-# ---------------------------------------------------------------------------
-# LLM interaction
-# ---------------------------------------------------------------------------
+def _log_start(task_name: str, model_name: str) -> None:
+    print(f"[START] task={task_name} env={BENCHMARK} model={model_name}", flush=True)
+
+
+def _log_step(step: int, action: str, reward: float, done: bool, error: str | None) -> None:
+    error_val = error if error is not None else "null"
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={str(done).lower()} error={error_val}",
+        flush=True,
+    )
+
+
+def _log_end(success: bool, steps: int, rewards: list[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
+        flush=True,
+    )
 
 
 def get_llm_action(
@@ -110,7 +123,6 @@ def get_llm_action(
 
             content = response.choices[0].message.content.strip()
 
-            # Strip markdown code fences if present
             if "```" in content:
                 parts = content.split("```")
                 for part in parts:
@@ -125,7 +137,6 @@ def get_llm_action(
             if result.get("policy") in VALID_ACTIONS:
                 return result
 
-            # LLM returned valid JSON but unknown action — retry
         except (json.JSONDecodeError, KeyError, IndexError):
             pass
         except Exception as exc:
@@ -134,13 +145,8 @@ def get_llm_action(
     return {"policy": "do_nothing", "reasoning": "Fallback after failed LLM attempts"}
 
 
-# ---------------------------------------------------------------------------
-# Task runner
-# ---------------------------------------------------------------------------
-
-
 def _post(url: str, payload: dict, retries: int = 3) -> dict:
-    """POST with retry and error handling. Returns parsed JSON response."""
+    """POST with retry and error handling."""
     for attempt in range(retries):
         try:
             resp = requests.post(url, json=payload, timeout=60)
@@ -153,80 +159,87 @@ def _post(url: str, payload: dict, retries: int = 3) -> dict:
     raise RuntimeError(f"Failed to reach {url} after {retries} attempts")
 
 
-def run_task(env_url: str, task_id: str, llm_client: OpenAI, model: str) -> float:
-    """Run a single governance task and return the grader score."""
-    print(f"\n{'=' * 60}")
-    print(f"  TASK: {task_id}")
-    print(f"{'=' * 60}")
+def run_task(env_url: str, task_id: str, llm_client: OpenAI, model: str) -> dict:
+    """Run a single governance task and return result dict."""
+    rewards: list[float] = []
+    step_count = 0
+    done = False
+    success = False
+
+    _log_start(task_id, model)
 
     try:
         data = _post(f"{env_url}/reset", {"task_id": task_id, "episode_id": task_id})
         observation = data.get("observation", {})
 
-        step_num = 0
-        max_steps = 100
-        while not observation.get("done", False) and step_num < max_steps:
-            step_num += 1
-            month = observation.get("month", step_num)
-            max_months = observation.get("max_months", "?")
-
+        while not done and step_count < 100:
             action = get_llm_action(llm_client, model, observation)
             policy = action.get("policy", "do_nothing")
             reasoning = action.get("reasoning", "")
+            action_str = json.dumps({"policy": policy, "reasoning": reasoning}, separators=(",", ":"))
 
-            print(f"  Month {month}/{max_months}: {policy} — {reasoning}")
-
-            data = _post(
-                f"{env_url}/step",
-                {"action": {"policy": policy, "reasoning": reasoning}},
-            )
-            observation = data.get("observation", {})
+            try:
+                data = _post(
+                    f"{env_url}/step",
+                    {"action": {"policy": policy, "reasoning": reasoning}},
+                )
+                reward = float(data.get("reward", 0.0))
+                done = bool(data.get("done", False))
+                observation = data.get("observation", {})
+                rewards.append(reward)
+                step_count += 1
+                _log_step(step_count, action_str, reward, done, None)
+            except Exception as exc:
+                _log_step(step_count + 1, action_str, 0.0, False, str(exc))
+                break
 
         meta = observation.get("metadata", {})
         grader_score = meta.get("grader_score", 0.0)
+        success = done and grader_score > 0.0
 
-        print(f"\n  Final city metrics:")
-        for key in [
-            "economy", "health", "education", "pollution",
-            "happiness", "inequality", "budget", "unemployment",
-        ]:
-            print(f"    {key:>14s}: {observation.get(key, 'N/A')}")
-        print(f"\n  GRADER SCORE: {grader_score:.4f}")
-
-        return grader_score
+        return {
+            "task_id": task_id,
+            "steps": step_count,
+            "total_reward": round(sum(rewards), 3),
+            "average_reward": round(sum(rewards) / step_count, 3) if step_count else 0.0,
+            "grader_score": grader_score,
+            "success": success,
+        }
 
     except Exception as exc:
-        print(f"\n  Task {task_id} failed: {exc}")
-        return 0.0
+        return {
+            "task_id": task_id,
+            "steps": step_count,
+            "total_reward": 0.0,
+            "average_reward": 0.0,
+            "grader_score": 0.0,
+            "success": False,
+            "error": str(exc),
+        }
+
+    finally:
+        _log_end(success=success, steps=step_count, rewards=rewards)
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+def main() -> int:
+    if not HF_TOKEN:
+        print("ERROR: HF_TOKEN environment variable is required.")
+        return 1
 
-
-def main() -> None:
-    if not API_BASE_URL or not MODEL_NAME or not API_KEY:
-        print(
-            "ERROR: Set API_BASE_URL, MODEL_NAME, and HF_TOKEN (or API_KEY) "
-            "environment variables."
-        )
-        sys.exit(1)
-
-    llm_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    llm_client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+    base_url = ENV_URL.rstrip("/")
 
     print("=" * 60)
     print("  GovernAI — AI Policy Simulator")
     print("=" * 60)
-    print(f"  Environment : {ENV_URL}")
+    print(f"  Environment : {base_url}")
     print(f"  LLM model   : {MODEL_NAME}")
     print()
 
-    # Health check with retries (container may still be starting)
     healthy = False
     for attempt in range(10):
         try:
-            resp = requests.get(f"{ENV_URL}/health", timeout=10)
+            resp = requests.get(f"{base_url}/health", timeout=10)
             if resp.status_code == 200:
                 healthy = True
                 break
@@ -237,27 +250,26 @@ def main() -> None:
         time.sleep(wait)
 
     if not healthy:
-        print(f"Cannot connect to environment at {ENV_URL} after 10 attempts")
-        sys.exit(1)
-    print("  Environment health check: OK")
+        print(f"Cannot connect to environment at {base_url} after 10 attempts")
+        return 1
+    print("  Environment health check: OK\n")
 
-    scores: dict[str, float] = {}
-    start = time.time()
-
+    results = []
     for task_id in TASKS:
-        scores[task_id] = run_task(ENV_URL, task_id, llm_client, MODEL_NAME)
-
-    elapsed = time.time() - start
+        results.append(run_task(base_url, task_id, llm_client, MODEL_NAME))
 
     print(f"\n{'=' * 60}")
     print("  SUMMARY")
     print(f"{'=' * 60}")
-    for task_id, score in scores.items():
-        print(f"    {task_id:>25s}: {score:.4f}")
-    avg = sum(scores.values()) / len(scores) if scores else 0.0
+    for r in results:
+        score = r.get("grader_score", 0.0)
+        print(f"    {r['task_id']:>25s}: {score:.4f}")
+    scores = [r.get("grader_score", 0.0) for r in results]
+    avg = sum(scores) / len(scores) if scores else 0.0
     print(f"\n    {'Average':>25s}: {avg:.4f}")
-    print(f"    {'Total time':>25s}: {elapsed:.1f}s")
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
