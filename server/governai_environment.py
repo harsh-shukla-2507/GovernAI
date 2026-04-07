@@ -360,7 +360,8 @@ class GovernAIEnvironment:
             "crisis_governance": self._grade_crisis,
         }
         fn = dispatch.get(self._task_id, self._grade_stable_city)
-        return round(fn(), 4)
+        raw = round(fn(), 4)
+        return max(0.01, min(0.99, raw))
 
     def _quality_score(self) -> float:
         """Weighted quality score of current metrics — 0.0 to 1.0."""
