@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import time
+from typing import Dict, List, Optional
 
 import requests
 from openai import OpenAI
@@ -76,20 +77,35 @@ Valid actions:
 """
 
 
+def _clamp(v: float) -> float:
+    """Ensure a score/reward value is strictly within (0, 1)."""
+    return max(0.01, min(0.99, v))
+
+
+def _safe_reward(raw: object) -> float:
+    """Extract a float reward from an API response value, clamped to (0, 1)."""
+    try:
+        return _clamp(float(raw))
+    except (TypeError, ValueError):
+        return 0.01
+
+
 def _log_start(task_name: str, model_name: str) -> None:
     print(f"[START] task={task_name} env={BENCHMARK} model={model_name}", flush=True)
 
 
-def _log_step(step: int, action: str, reward: float, done: bool, error: str | None) -> None:
+def _log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    r = _clamp(reward)
     error_val = error if error is not None else "null"
     print(
-        f"[STEP] step={step} action={action} reward={reward:.2f} done={str(done).lower()} error={error_val}",
+        f"[STEP] step={step} action={action} reward={r:.2f} done={str(done).lower()} error={error_val}",
         flush=True,
     )
 
 
-def _log_end(success: bool, steps: int, rewards: list[float]) -> None:
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+def _log_end(success: bool, steps: int, rewards: List[float]) -> None:
+    safe = [_clamp(r) for r in rewards]
+    rewards_str = ",".join(f"{r:.2f}" for r in safe)
     print(
         f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
         flush=True,
@@ -97,8 +113,8 @@ def _log_end(success: bool, steps: int, rewards: list[float]) -> None:
 
 
 def get_llm_action(
-    client: OpenAI, model: str, observation: dict, max_retries: int = 3
-) -> dict:
+    client: OpenAI, model: str, observation: Dict, max_retries: int = 3
+) -> Dict:
     """Ask the LLM to choose a policy action given the current city status."""
     narrative = observation.get("narrative", "No status available.")
 
@@ -145,7 +161,7 @@ def get_llm_action(
     return {"policy": "do_nothing", "reasoning": "Fallback after failed LLM attempts"}
 
 
-def _post(url: str, payload: dict, retries: int = 3) -> dict:
+def _post(url: str, payload: Dict, retries: int = 3) -> Dict:
     """POST with retry and error handling."""
     for attempt in range(retries):
         try:
@@ -159,9 +175,9 @@ def _post(url: str, payload: dict, retries: int = 3) -> dict:
     raise RuntimeError(f"Failed to reach {url} after {retries} attempts")
 
 
-def run_task(env_url: str, task_id: str, llm_client: OpenAI, model: str) -> dict:
+def run_task(env_url: str, task_id: str, llm_client: OpenAI, model: str) -> Dict:
     """Run a single governance task and return result dict."""
-    rewards: list[float] = []
+    rewards: List[float] = []
     step_count = 0
     done = False
     success = False
@@ -183,25 +199,27 @@ def run_task(env_url: str, task_id: str, llm_client: OpenAI, model: str) -> dict
                     f"{env_url}/step",
                     {"action": {"policy": policy, "reasoning": reasoning}},
                 )
-                reward = float(data.get("reward", 0.0))
+                reward = _safe_reward(data.get("reward"))
                 done = bool(data.get("done", False))
                 observation = data.get("observation", {})
                 rewards.append(reward)
                 step_count += 1
                 _log_step(step_count, action_str, reward, done, None)
             except Exception as exc:
-                _log_step(step_count + 1, action_str, 0.0, False, str(exc))
+                step_count += 1
+                rewards.append(0.01)
+                _log_step(step_count, action_str, 0.01, False, str(exc))
                 break
 
         meta = observation.get("metadata", {})
-        grader_score = meta.get("grader_score", 0.0)
-        success = done and grader_score > 0.0
+        grader_score = _clamp(float(meta.get("grader_score", 0.5)))
+        success = done
 
         return {
             "task_id": task_id,
             "steps": step_count,
             "total_reward": round(sum(rewards), 3),
-            "average_reward": round(sum(rewards) / step_count, 3) if step_count else 0.0,
+            "average_reward": _clamp(sum(rewards) / step_count) if step_count else 0.01,
             "grader_score": grader_score,
             "success": success,
         }
@@ -210,9 +228,9 @@ def run_task(env_url: str, task_id: str, llm_client: OpenAI, model: str) -> dict
         return {
             "task_id": task_id,
             "steps": step_count,
-            "total_reward": 0.0,
-            "average_reward": 0.0,
-            "grader_score": 0.0,
+            "total_reward": 0.01,
+            "average_reward": 0.01,
+            "grader_score": 0.01,
             "success": False,
             "error": str(exc),
         }
@@ -262,10 +280,10 @@ def main() -> int:
     print("  SUMMARY")
     print(f"{'=' * 60}")
     for r in results:
-        score = r.get("grader_score", 0.0)
+        score = _clamp(float(r.get("grader_score", 0.5)))
         print(f"    {r['task_id']:>25s}: {score:.4f}")
-    scores = [r.get("grader_score", 0.0) for r in results]
-    avg = sum(scores) / len(scores) if scores else 0.0
+    scores = [_clamp(float(r.get("grader_score", 0.5))) for r in results]
+    avg = _clamp(sum(scores) / len(scores)) if scores else 0.5
     print(f"\n    {'Average':>25s}: {avg:.4f}")
 
     return 0

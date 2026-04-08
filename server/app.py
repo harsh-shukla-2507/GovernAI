@@ -80,7 +80,12 @@ async def reset(request: ResetRequest = ResetRequest()):
 
 @app.post("/step")
 async def step(request: StepRequest):
-    action = GovernAIAction(**request.action)
+    action_data = dict(request.action)
+    safe_data = {
+        "policy": action_data.get("policy", "do_nothing"),
+        "reasoning": action_data.get("reasoning", ""),
+    }
+    action = GovernAIAction(**safe_data)
     obs = _env.step(action)
     return {
         "observation": obs.model_dump(),

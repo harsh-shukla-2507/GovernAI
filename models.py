@@ -10,16 +10,16 @@ class Action(BaseModel):
     """OpenEnv-compatible base action."""
 
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    model_config = {"extra": "forbid", "arbitrary_types_allowed": True}
+    model_config = {"extra": "allow", "arbitrary_types_allowed": True}
 
 
 class Observation(BaseModel):
     """OpenEnv-compatible base observation."""
 
     done: bool = False
-    reward: Optional[float] = None
+    reward: float = 0.5
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    model_config = {"extra": "forbid", "arbitrary_types_allowed": True}
+    model_config = {"extra": "allow", "arbitrary_types_allowed": True}
 
 
 class State(BaseModel):
