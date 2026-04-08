@@ -351,7 +351,7 @@ class GovernAIEnvironment:
             reward -= 0.15
         if m["health"] < 15:
             reward -= 0.10
-        return round(max(-1.0, min(1.0, reward)), 4)
+        return round(max(0.01, min(0.99, reward)), 4)
 
     def _compute_grader_score(self) -> float:
         dispatch = {
