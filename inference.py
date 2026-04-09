@@ -27,7 +27,7 @@ from openai import OpenAI
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.2-3B-Instruct")
-HF_TOKEN = os.getenv("HF_TOKEN")
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 ENV_URL = os.getenv("ENV_URL") or os.getenv("ENV_BASE_URL", "http://localhost:7860")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 BENCHMARK = "governai"
@@ -77,17 +77,26 @@ Valid actions:
 """
 
 
-def _clamp(v: float) -> float:
-    """Ensure a score/reward value is strictly within (0, 1)."""
-    return max(0.01, min(0.99, v))
+SCORE_FLOOR = 0.001
+SCORE_CEILING = 0.999
+
+
+def _strict_score(value: float) -> float:
+    """Clamp a score to strictly within (0, 1) — matching the sample inference format."""
+    score = round(float(value), 3)
+    if score <= SCORE_FLOOR:
+        return SCORE_FLOOR
+    if score >= SCORE_CEILING:
+        return SCORE_CEILING
+    return score
 
 
 def _safe_reward(raw: object) -> float:
-    """Extract a float reward from an API response value, clamped to (0, 1)."""
+    """Extract a float reward from an API response value."""
     try:
-        return _clamp(float(raw))
+        return float(raw)
     except (TypeError, ValueError):
-        return 0.01
+        return 0.0
 
 
 def _log_start(task_name: str, model_name: str) -> None:
@@ -95,26 +104,24 @@ def _log_start(task_name: str, model_name: str) -> None:
 
 
 def _log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
-    r = _clamp(reward)
     error_val = error if error is not None else "null"
     print(
-        f"[STEP] step={step} action={action} reward={r:.2f} done={str(done).lower()} error={error_val}",
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={str(done).lower()} error={error_val}",
         flush=True,
     )
 
 
-def _log_end(success: bool, steps: int, rewards: List[float]) -> None:
-    safe = [_clamp(r) for r in rewards]
-    rewards_str = ",".join(f"{r:.2f}" for r in safe)
+def _log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{reward:.2f}" for reward in rewards)
     print(
-        f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
         flush=True,
     )
 
 
 def get_llm_action(
-    client: OpenAI, model: str, observation: Dict, max_retries: int = 3
-) -> Dict:
+    client: OpenAI, model: str, observation: dict, max_retries: int = 3
+) -> dict:
     """Ask the LLM to choose a policy action given the current city status."""
     narrative = observation.get("narrative", "No status available.")
 
@@ -181,6 +188,7 @@ def run_task(env_url: str, task_id: str, llm_client: OpenAI, model: str) -> Dict
     step_count = 0
     done = False
     success = False
+    score = 0.0
 
     _log_start(task_id, model)
 
@@ -206,37 +214,37 @@ def run_task(env_url: str, task_id: str, llm_client: OpenAI, model: str) -> Dict
                 step_count += 1
                 _log_step(step_count, action_str, reward, done, None)
             except Exception as exc:
-                step_count += 1
-                rewards.append(0.01)
-                _log_step(step_count, action_str, 0.01, False, str(exc))
+                _log_step(step_count + 1, action_str, 0.0, False, str(exc))
                 break
 
-        meta = observation.get("metadata", {})
-        grader_score = _clamp(float(meta.get("grader_score", 0.5)))
+        score = _strict_score(
+            round(sum(rewards) / len(rewards), 2) if rewards else 0.0
+        )
         success = done
 
         return {
             "task_id": task_id,
             "steps": step_count,
             "total_reward": round(sum(rewards), 3),
-            "average_reward": _clamp(sum(rewards) / step_count) if step_count else 0.01,
-            "grader_score": grader_score,
+            "average_reward": round(sum(rewards) / step_count, 3) if step_count else 0.0,
+            "score": score,
             "success": success,
         }
 
     except Exception as exc:
+        score = SCORE_FLOOR
         return {
             "task_id": task_id,
             "steps": step_count,
-            "total_reward": 0.01,
-            "average_reward": 0.01,
-            "grader_score": 0.01,
+            "total_reward": round(sum(rewards), 3),
+            "average_reward": round(sum(rewards) / step_count, 3) if step_count else 0.0,
+            "score": score,
             "success": False,
             "error": str(exc),
         }
 
     finally:
-        _log_end(success=success, steps=step_count, rewards=rewards)
+        _log_end(success=success, steps=step_count, score=score, rewards=rewards)
 
 
 def main() -> int:
@@ -280,11 +288,10 @@ def main() -> int:
     print("  SUMMARY")
     print(f"{'=' * 60}")
     for r in results:
-        score = _clamp(float(r.get("grader_score", 0.5)))
-        print(f"    {r['task_id']:>25s}: {score:.4f}")
-    scores = [_clamp(float(r.get("grader_score", 0.5))) for r in results]
-    avg = _clamp(sum(scores) / len(scores)) if scores else 0.5
-    print(f"\n    {'Average':>25s}: {avg:.4f}")
+        print(f"    {r['task_id']:>25s}: {r.get('score', SCORE_FLOOR):.3f}")
+    scores = [r.get("score", SCORE_FLOOR) for r in results]
+    avg = _strict_score(sum(scores) / len(scores)) if scores else SCORE_FLOOR
+    print(f"\n    {'Average':>25s}: {avg:.3f}")
 
     return 0
 
